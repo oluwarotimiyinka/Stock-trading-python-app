@@ -1,4 +1,5 @@
 requests
 openai
-dotenv
-csv
+python-dotenv
+pandas
+snowflake-connector-python

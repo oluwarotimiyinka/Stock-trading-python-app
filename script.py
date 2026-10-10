@@ -1,20 +1,23 @@
-import csv
 import os
-import time
 
+import pandas as pd
 import requests
+import snowflake.connector
 from dotenv import load_dotenv
+from snowflake.connector.pandas_tools import write_pandas
 
 load_dotenv()
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
+SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
+SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
+SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE")
+SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
+SNOWFLAKE_TABLE = os.getenv("SNOWFLAKE_TABLE", "STOCK_TICKERS")
 
-print(POLYGON_API_KEY)
-
-# Massive Basic/trial: 5 REST requests per minute.
 LIMIT = 100
-MAX_PAGES = 5
-REQUEST_INTERVAL_SECONDS = 60 / MAX_PAGES
 
 url = (
     "https://api.massive.com/v3/reference/tickers"
@@ -22,25 +25,19 @@ url = (
     f"&apiKey={POLYGON_API_KEY}"
 )
 
-tickers = []
-pages_fetched = 0
-
 response = requests.get(url)
+tickers = []
+
 data = response.json()
-pages_fetched += 1
+for ticker in data["results"]:
+    tickers.append(ticker)
 
-if "results" in data:
-    tickers.extend(data["results"])
-
-while "next_url" in data and pages_fetched < MAX_PAGES:
-    time.sleep(REQUEST_INTERVAL_SECONDS)
+while "next_url" in data:
     print("Fetching next page", data["next_url"])
     response = requests.get(data["next_url"] + f"&apiKey={POLYGON_API_KEY}")
     data = response.json()
-    pages_fetched += 1
-    print(data)
-    if "results" in data:
-        tickers.extend(data["results"])
+    for ticker in data["results"]:
+        tickers.append(ticker)
 
 example_ticker = {
     "ticker": "GLWG",
@@ -57,17 +54,51 @@ example_ticker = {
 }
 
 fieldnames = list(example_ticker.keys())
-output_path = "tickers.csv"
+df = pd.DataFrame(tickers)
+df = df.reindex(columns=fieldnames)
+df.columns = [col.upper() for col in df.columns]
 
-with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
-    writer = csv.DictWriter(
-        csvfile,
-        fieldnames=fieldnames,
-        extrasaction="ignore",
-        restval="",
+conn = snowflake.connector.connect(
+    account=SNOWFLAKE_ACCOUNT,
+    user=SNOWFLAKE_USER,
+    password=SNOWFLAKE_PASSWORD,
+    warehouse=SNOWFLAKE_WAREHOUSE,
+)
+
+with conn.cursor() as cur:
+    cur.execute(f"CREATE DATABASE IF NOT EXISTS {SNOWFLAKE_DATABASE}")
+    cur.execute(f"USE DATABASE {SNOWFLAKE_DATABASE}")
+    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SNOWFLAKE_SCHEMA}")
+    cur.execute(f"USE SCHEMA {SNOWFLAKE_SCHEMA}")
+    cur.execute(f"USE WAREHOUSE {SNOWFLAKE_WAREHOUSE}")
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SNOWFLAKE_TABLE} (
+            TICKER VARCHAR,
+            NAME VARCHAR,
+            MARKET VARCHAR,
+            LOCALE VARCHAR,
+            PRIMARY_EXCHANGE VARCHAR,
+            TYPE VARCHAR,
+            ACTIVE BOOLEAN,
+            CURRENCY_NAME VARCHAR,
+            COMPOSITE_FIGI VARCHAR,
+            SHARE_CLASS_FIGI VARCHAR,
+            LAST_UPDATED_UTC TIMESTAMP_TZ
+        )
+        """
     )
-    writer.writeheader()
-    writer.writerows(tickers)
+    cur.execute(f"TRUNCATE TABLE {SNOWFLAKE_TABLE}")
+
+success, nchunks, nrows, _ = write_pandas(
+    conn,
+    df,
+    SNOWFLAKE_TABLE,
+    database=SNOWFLAKE_DATABASE,
+    schema=SNOWFLAKE_SCHEMA,
+    quote_identifiers=False,
+)
+conn.close()
 
 print(len(tickers))
-print(f"Wrote {len(tickers)} rows to {output_path}")
+print(f"Loaded {nrows} rows into {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE}")
