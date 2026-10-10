@@ -1,5 +1,6 @@
 requests
 openai
 python-dotenv
-pandas
-snowflake-connector-python
+pandas>=2.1.2,<3.0.0
+pyarrow>=14.0.1
+snowflake-connector-python[pandas]
